@@ -194,7 +194,7 @@ if __name__ == "__main__":
     # debugpy.listen(("0.0.0.0", 10092))
     # print("🔍 Rank 0 waiting for debugger attach on port 10092...")
     # debugpy.wait_for_client()
-    args.config_yaml = "examples/MultiRobot/train_files/starvla_cotrain_multiRobot.yaml"
+    # args.config_yaml = "examples/MultiRobot/train_files/starvla_cotrain_multiRobot.yaml"
     cfg = OmegaConf.load(args.config_yaml)
     # try get model
     # cfg.framework.action_model.action_hidden_dim = 2048
