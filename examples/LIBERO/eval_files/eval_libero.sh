@@ -1,6 +1,6 @@
 #!/bin/bash
 
-cd /mnt/petrelfs/yejinhui/Projects/starVLA
+# cd /mnt/petrelfs/yejinhui/Projects/starVLA
 # conda activate starVLA
 
 ###########################################################################################
