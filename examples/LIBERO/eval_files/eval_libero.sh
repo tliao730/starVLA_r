@@ -16,7 +16,7 @@ export PYTHONPATH=$(pwd):${PYTHONPATH} # let LIBERO find the websocket tools fro
 host="127.0.0.1"
 base_port=5694
 unnorm_key="franka"
-your_ckpt=./checkpoints/steps_50000_pytorch_model.pt
+your_ckpt=content/checkpoints/steps_50000_pytorch_model.pt
 export DEBUG=true
 
 folder_name=$(echo "$your_ckpt" | awk -F'/' '{print $(NF-2)"_"$(NF-1)"_"$NF}')
