@@ -1,3 +1,7 @@
+import builtins
+def mock_input(prompt=""):
+    return "N"
+builtins.input = mock_input
 import dataclasses
 import datetime as dt
 import json
@@ -68,7 +72,7 @@ def eval_libero(args: Args) -> None:
     logging.info(f"Task suite: {args.task_suite_name}")
 
     # args.video_out_path = f"{date_base}+{args.job_name}"
-    
+
     pathlib.Path(args.video_out_path).mkdir(parents=True, exist_ok=True)
 
     if args.task_suite_name == "libero_spatial":
@@ -123,9 +127,9 @@ def eval_libero(args: Args) -> None:
 
             logging.info(f"Starting episode {task_episodes + 1}...")
             step = 0
-            
+
             # full_actions = np.load("./debug/action.npy")
-            
+
             while t < max_steps + args.num_steps_wait:
                 # try:
                 # IMPORTANT: Do nothing for the first few timesteps because the simulator drops objects
@@ -152,7 +156,7 @@ def eval_libero(args: Args) -> None:
                     )
                 )
 
-                observation = { # 
+                observation = { #
                     "observation.primary": np.expand_dims(
                         img, axis=0
                     ),  # (H, W, C), dtype=unit8, range(0-255)
@@ -169,17 +173,17 @@ def eval_libero(args: Args) -> None:
                     "lang": observation["instruction"][0],
                 }
 
-                
+
                 start_time = time.time()
-                
-                response = client_model.step(example=example_dict, step=step) 
-                
+
+                response = client_model.step(example=example_dict, step=step)
+
                 end_time = time.time()
                 # print(f"time: {end_time - start_time}")
-                
-                # # 
+
+                # #
                 raw_action = response["raw_action"]
-                
+
                 world_vector_delta = np.asarray(raw_action.get("world_vector"), dtype=np.float32).reshape(-1)
                 rotation_delta = np.asarray(raw_action.get("rotation_delta"), dtype=np.float32).reshape(-1)
                 open_gripper = np.asarray(raw_action.get("open_gripper"), dtype=np.float32).reshape(-1)
@@ -197,7 +201,7 @@ def eval_libero(args: Args) -> None:
                     delta_action = np.concatenate([world_vector_delta, rotation_delta, gripper], axis=0)
 
                 full_actions.append(delta_action)
-                
+
                 # __import__("ipdb").set_trace()
                 # see ../robosuite/controllers/controller_factory.py
                 obs, reward, done, info = env.step(delta_action.tolist())
@@ -220,10 +224,10 @@ def eval_libero(args: Args) -> None:
                 [np.asarray(x) for x in replay_images],
                 fps=10,
             )
-            
+
             full_actions = np.stack(full_actions)
             # np.save(pathlib.Path(args.video_out_path) / f"rollout_{task_segment}_episode{episode_idx}_{suffix}.npy", full_actions)
-            
+
             # print(pathlib.Path(args.video_out_path) / f"rollout_{task_segment}_episode{episode_idx}_{suffix}.mp4")
             # Log current results
             logging.info(f"Success: {done}")
