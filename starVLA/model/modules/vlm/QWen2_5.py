@@ -308,7 +308,7 @@ if __name__ == "__main__":
 
     cfg = OmegaConf.load(args.config_yaml)
 
-    model_id = "starVLA_r/playground/Pretrained_models/Qwen2.5-VL-3B-Instruct"
+    model_id = "/content/starVLA_r/playground/Pretrained_models/Qwen2.5-VL-3B-Instruct"
     cfg.framework.qwenvl.base_vlm = model_id
 
     model = _QWen_VL_Interface(config=cfg)
