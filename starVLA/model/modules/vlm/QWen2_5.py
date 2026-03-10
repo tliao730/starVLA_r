@@ -1,5 +1,5 @@
 # Copyright 2025 starVLA community. All rights reserved.
-# Licensed under the MIT License, Version 1.0 (the "License"); 
+# Licensed under the MIT License, Version 1.0 (the "License");
 # Implemented by [Jinhui YE / HKUST University] in [2025].
 
 import torch
@@ -286,7 +286,7 @@ class _QWen_VL_Interface(nn.Module):
                     # If no action token is found, mask the entire sequence.
                     seq[:] = IGNORE_INDEX
                     RuntimeWarning (f"action token are on in yout tokenizer, plz see starVLA/model/modules/vlm/tools/add_qwen_special_tokens/README.md.")
-            
+
             labels[labels == self.processor.tokenizer.pad_token_id] = -100 ## mask out pad tokens as well
             batch_input['labels'] = labels
 
@@ -307,8 +307,8 @@ if __name__ == "__main__":
     debugpy.wait_for_client()
 
     cfg = OmegaConf.load(args.config_yaml)
-    
-    model_id = "./playground/Pretrained_models/Qwen2.5-VL-3B-Instruct"
+
+    model_id = "/playground/Pretrained_models/Qwen2.5-VL-3B-Instruct"
     cfg.framework.qwenvl.base_vlm = model_id
 
     model = _QWen_VL_Interface(config=cfg)
