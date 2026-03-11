@@ -7,9 +7,15 @@ port=5694
 ################# star Policy Server ######################
 
 # export DEBUG=true
-CUDA_VISIBLE_DEVICES=$gpu_id ${star_vla_python} deployment/model_server/server_policy.py \
+# CUDA_VISIBLE_DEVICES=$gpu_id ${star_vla_python} deployment/model_server/server_policy.py \
+#     --ckpt_path ${your_ckpt} \
+#     --port ${port} \
+#     --use_bf16
+
+# recode the server logs, we use nohup to run the server in the background.
+nohup env CUDA_VISIBLE_DEVICES=$gpu_id ${star_vla_python} deployment/model_server/server_policy.py \
     --ckpt_path ${your_ckpt} \
     --port ${port} \
-    --use_bf16
+    --use_bf16 > server.log 2>&1 &
 
 # #################################

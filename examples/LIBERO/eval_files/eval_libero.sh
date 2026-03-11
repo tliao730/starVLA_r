@@ -17,7 +17,7 @@ host="127.0.0.1"
 base_port=5694
 unnorm_key="franka"
 your_ckpt=results/Checkpoints/Qwen2.5-VL-FAST-LIBERO-4in1/checkpoints/steps_30000_pytorch_model.pt
-export DEBUG=true
+# export DEBUG=true
 
 folder_name=$(echo "$your_ckpt" | awk -F'/' '{print $(NF-2)"_"$(NF-1)"_"$NF}')
 # === End of environment variable configuration ===
@@ -28,9 +28,20 @@ mkdir -p ${LOG_DIR}
 
 
 task_suite_name=libero_goal
-num_trials_per_task=50
+# num_trials_per_task=50
+num_trials_per_task=1
 video_out_path="results/${task_suite_name}/${folder_name}"
 
+# ${LIBERO_Python} ./examples/LIBERO/eval_files/eval_libero.py \
+#     --args.pretrained-path ${your_ckpt} \
+#     --args.host "$host" \
+#     --args.port $base_port \
+#     --args.task-suite-name "$task_suite_name" \
+#     --args.num-trials-per-task "$num_trials_per_task" \
+#     --args.video-out-path "$video_out_path"
+
+# record logs for evaluation
+eval_log_file="${LOG_DIR}/eval_libero.log"
 
 ${LIBERO_Python} ./examples/LIBERO/eval_files/eval_libero.py \
     --args.pretrained-path ${your_ckpt} \
@@ -38,4 +49,8 @@ ${LIBERO_Python} ./examples/LIBERO/eval_files/eval_libero.py \
     --args.port $base_port \
     --args.task-suite-name "$task_suite_name" \
     --args.num-trials-per-task "$num_trials_per_task" \
-    --args.video-out-path "$video_out_path"
+    --args.video-out-path "$video_out_path" > "${eval_log_file}" 2>&1
+
+# print the evaluation logs after the evaluation is done
+echo "Evaluation script finished. Printing content of ${eval_log_file}:"
+cat "${eval_log_file}"
