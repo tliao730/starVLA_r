@@ -43,7 +43,7 @@ video_out_path="results/${task_suite_name}/${folder_name}"
 # record logs for evaluation
 eval_log_file="${LOG_DIR}/eval_libero.log"
 
-${LIBERO_Python} ./examples/LIBERO/eval_files/eval_libero.py \
+${LIBERO_Python} -u ./examples/LIBERO/eval_files/eval_libero.py \
     --args.pretrained-path ${your_ckpt} \
     --args.host "$host" \
     --args.port $base_port \
