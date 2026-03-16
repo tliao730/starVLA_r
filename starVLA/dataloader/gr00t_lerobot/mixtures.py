@@ -24,9 +24,19 @@ DATASET_NAMED_MIXTURES = {
         ("libero_10_no_noops_1.0.0_lerobot", 1.0, "libero_franka"),
         # ("libero_90_no_noops_lerobot", 1.0, "libero_franka"),
     ],
-    "libero_90_t2_33_48": [
-        ("libero_90_t2_33_48", 1.0, "libero_franka"),
+    # "libero_90_t2_33_48": [
+    #     ("libero_90_t2_33_48", 1.0, "libero_franka"),
+    # ],
+    "libero_90_task_2": [
+        ("libero_90_task_2", 1.0, "libero_franka"),
     ],
+    "libero_90_task_33": [
+        ("libero_90_task_33", 1.0, "libero_franka"),
+    ],
+    "libero_90_task_48": [
+        ("libero_90_task_48", 1.0, "libero_franka"),
+    ],
+
     "libero_goal": [
         ("libero_goal_no_noops_1.0.0_lerobot", 1.0, "libero_franka"),
     ],
