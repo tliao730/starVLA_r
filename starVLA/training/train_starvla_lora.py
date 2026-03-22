@@ -313,8 +313,9 @@ class VLATrainer(TrainerUtils):
         """Run simple action-eval on current batch and attach score to metrics."""
         examples = self._get_next_batch()
         actions = [example["action"] for example in examples]
-        output_dict = self.model.predict_action(examples=examples, use_ddim=True, num_ddim_steps=20)
-
+        #output_dict = self.model.predict_action(examples=examples, use_ddim=True, num_ddim_steps=20)
+        unwrapped_model = self.accelerator.unwrap_model(self.model)
+        output_dict = unwrapped_model.predict_action(examples=examples, use_ddim=True, num_ddim_steps=20)
         if self.accelerator.is_main_process:
             normalized_actions = output_dict["normalized_actions"]
             actions = np.array(actions)
