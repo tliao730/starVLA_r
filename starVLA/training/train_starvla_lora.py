@@ -405,8 +405,7 @@ def main(cfg) -> None:
             lora_alpha=lora_cfg.get("lora_alpha", 32),
             target_modules=target_modules,
             lora_dropout=lora_cfg.get("lora_dropout", 0.05),
-            bias="none",
-            task_type="CAUSAL_LM"
+            bias="none"
         )
         
         #if hasattr(vla, "enable_input_require_grads"):
