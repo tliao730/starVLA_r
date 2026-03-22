@@ -409,8 +409,8 @@ def main(cfg) -> None:
             task_type="CAUSAL_LM"
         )
         
-        if hasattr(vla, "enable_input_require_grads"):
-            vla.enable_input_require_grads()
+        #if hasattr(vla, "enable_input_require_grads"):
+        #    vla.enable_input_require_grads()
             
         vla = get_peft_model(vla, peft_config)
         
