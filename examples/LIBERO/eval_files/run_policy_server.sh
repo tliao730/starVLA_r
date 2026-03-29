@@ -1,7 +1,8 @@
 #!/bin/bash
 export PYTHONPATH=$(pwd):${PYTHONPATH} # let LIBERO find the websocket tools from main repo
 export star_vla_python=/usr/local/envs/starvla/bin/python
-your_ckpt=results/Checkpoints/Qwen2.5-VL-FAST-LIBERO-4in1/checkpoints/steps_30000_pytorch_model.pt
+# your_ckpt=results/Checkpoints/Qwen2.5-VL-FAST-LIBERO-4in1/checkpoints/steps_30000_pytorch_model.pt
+your_ckpt=results/Checkpoints/finetune_task2/checkpoints/steps_2000_pytorch_model.pt
 gpu_id=0
 port=5694
 ################# star Policy Server ######################
