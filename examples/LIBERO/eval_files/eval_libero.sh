@@ -27,7 +27,7 @@ folder_name=$(echo "$your_ckpt" | awk -F'/' '{print $(NF-2)"_"$(NF-1)"_"$NF}')
 LOG_DIR="logs/$(date +"%Y%m%d_%H%M%S")"
 mkdir -p ${LOG_DIR}
 
-# "libero_goal", "libero_spatial", "libero_object", "libero_90", "libero_10"
+# "libero_goal", "libero_spatial", "libero_object", "libero_10", "libero_90"
 task_suite_name=libero_90
 # num_trials_per_task=50
 num_trials_per_task=10
