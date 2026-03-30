@@ -41,9 +41,9 @@ class Args:
     #################################################################################################################
     # LIBERO environment-specific parameters
     #################################################################################################################
-    task_suite_name: str = "libero_goal"  # Task suite. Options: libero_spatial, libero_object, libero_goal, libero_10, libero_90
+    task_suite_name: str = "libero_90"  # Task suite. Options: libero_spatial, libero_object, libero_goal, libero_10, libero_90
     num_steps_wait: int = 10  # Number of steps to wait for objects to stabilize i n sim
-    num_trials_per_task: int = 50  # Number of rollouts per task
+    num_trials_per_task: int = 10  # Number of rollouts per task
 
     #################################################################################################################
     # Utils
@@ -99,7 +99,7 @@ def eval_libero(args: Args) -> None:
     # Start evaluation
     total_episodes, total_successes = 0, 0
     # for task_id in tqdm.tqdm(range(num_tasks_in_suite)):
-    for task_id in tqdm.tqdm([55]):
+    for task_id in tqdm.tqdm([57]):
         # Get task
         task = task_suite.get_task(task_id)
 
