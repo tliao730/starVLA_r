@@ -14,7 +14,7 @@ export PYTHONPATH=$(pwd):${PYTHONPATH} # let LIBERO find the websocket tools fro
 
 
 host="127.0.0.1"
-base_port=5694
+base_port=10093
 unnorm_key="franka"
 your_ckpt=results/Checkpoints/Qwen2.5-VL-FAST-LIBERO-4in1/checkpoints/steps_30000_pytorch_model.pt
 # your_ckpt=results/checkpoints/finetune_task48_2000step/final_model/pytorch_model.pt

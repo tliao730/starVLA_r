@@ -85,11 +85,25 @@ class _QWen_VL_Interface(nn.Module):
         qwenvl_config = config.framework.get("qwenvl", {})
         model_id = qwenvl_config.get("base_vlm", "Qwen/Qwen2.5-VL-3B-Instruct")
 
-        model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-            model_id,
-            attn_implementation="flash_attention_2",
-            torch_dtype="auto",
-        )
+        # Prefer config-specified attention implementation, but gracefully fallback when
+        # flash-attn is not available / ABI-incompatible with the current torch build.
+        attn_impl = qwenvl_config.get("attn_implementation", "flash_attention_2")
+        try:
+            model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+                model_id,
+                attn_implementation=attn_impl,
+                torch_dtype="auto",
+            )
+        except Exception as e:
+            logger.warning(
+                f"[Qwen2.5-VL] Failed to load with attn_implementation={attn_impl!r}: "
+                f"{type(e).__name__}: {e}. Falling back to attn_implementation='sdpa'."
+            )
+            model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+                model_id,
+                attn_implementation="sdpa",
+                torch_dtype="auto",
+            )
         processor = AutoProcessor.from_pretrained(model_id)
         processor.tokenizer.padding_side = "left"
 
