@@ -98,6 +98,7 @@ def eval_libero(args: Args) -> None:
 
     # Start evaluation
     total_episodes, total_successes = 0, 0
+    ##################### WHAT YOU WANT TO EVALUATE ##########################
     # for task_id in tqdm.tqdm(range(num_tasks_in_suite)):
     for task_id in tqdm.tqdm([55]):
         # Get task
