@@ -28,7 +28,7 @@ LOG_DIR="logs/$(date +"%Y%m%d_%H%M%S")"
 mkdir -p ${LOG_DIR}
 
 # "libero_goal", "libero_spatial", "libero_object", "libero_10", "libero_90"
-task_suite_name=libero_object
+task_suite_name=libero_goal
 # num_trials_per_task=50
 num_trials_per_task=10
 video_out_path="results/${task_suite_name}/${folder_name}"
