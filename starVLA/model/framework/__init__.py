@@ -30,7 +30,7 @@ if pkg_path is not None:
         for _, module_name, _ in pkgutil.iter_modules(pkg_path):
             importlib.import_module(f"{__name__}.{module_name}")
     except Exception as e:
-        logger.log(f"Warning: Failed to auto-import framework submodules: {e}")
+        logger.warning(f"Warning: Failed to auto-import framework submodules: {e}")
         
 def build_framework(cfg):
     """
