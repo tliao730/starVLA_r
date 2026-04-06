@@ -1,7 +1,7 @@
 #!/bin/bash
 export PYTHONPATH=$(pwd):${PYTHONPATH} # let LIBERO find the websocket tools from main repo
 export star_vla_python=/usr/local/envs/starvla/bin/python
-your_ckpt=results/checkpoints/merged_task33_fisher/models/merged_task33_fisher.pt
+your_ckpt=results/checkpoints/merged_task33_fisher/merging-checkpoints/checkpoints/task33-merging/models/merged_task33_fisher.pt
 # your_ckpt=results/Checkpoints/Qwen2.5-VL-FAST-LIBERO-4in1/checkpoints/steps_30000_pytorch_model.pt
 # your_ckpt=results/checkpoints/finetune_task48_2000step/final_model/pytorch_model.pt
 gpu_id=0
