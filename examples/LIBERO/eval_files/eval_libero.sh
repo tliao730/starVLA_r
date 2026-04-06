@@ -16,7 +16,8 @@ export PYTHONPATH=$(pwd):${PYTHONPATH} # let LIBERO find the websocket tools fro
 host="127.0.0.1"
 base_port=10093
 unnorm_key="franka"
-your_ckpt=results/Checkpoints/Qwen2.5-VL-FAST-LIBERO-4in1/checkpoints/steps_30000_pytorch_model.pt
+your_ckpt=results/checkpoints/merged_task33_fisher/models/merged_task33_fisher.pt
+# your_ckpt=results/Checkpoints/Qwen2.5-VL-FAST-LIBERO-4in1/checkpoints/steps_30000_pytorch_model.pt
 # your_ckpt=results/checkpoints/finetune_task48_2000step/final_model/pytorch_model.pt
 # export DEBUG=true
 
@@ -28,7 +29,7 @@ LOG_DIR="logs/$(date +"%Y%m%d_%H%M%S")"
 mkdir -p ${LOG_DIR}
 
 # "libero_goal", "libero_spatial", "libero_object", "libero_10", "libero_90"
-task_suite_name=libero_10
+task_suite_name=libero_spatial
 # num_trials_per_task=50
 num_trials_per_task=10
 video_out_path="results/${task_suite_name}/${folder_name}"
