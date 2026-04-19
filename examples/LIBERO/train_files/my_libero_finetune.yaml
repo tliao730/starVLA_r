@@ -5,6 +5,7 @@ trackers: [jsonl, wandb]
 wandb_entity: michellelin9102-usc
 wandb_project: starVLA_Libero
 is_debug: false
+use_lora: true
 
 framework:
   name: QwenFast
@@ -75,7 +76,7 @@ datasets:
 trainer:
   epochs: 100
   max_train_steps: 2000
-  num_warmup_steps: 5000
+  num_warmup_steps: 50
   save_interval: 500
   eval_interval: 100
   logging_frequency: 100
@@ -86,7 +87,7 @@ trainer:
   lr_scheduler_type: cosine_with_min_lr
   scheduler_specific_kwargs:
     min_lr: 1.0e-06
-  freeze_modules: "qwen_vl_interface.model.model.visual,dino_encoder"
+  freeze_modules: "qwen_vl_interface, action_model"
   loss_scale:
     vla: 1.0
     vlm: 0.1

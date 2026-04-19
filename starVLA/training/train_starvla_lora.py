@@ -66,6 +66,63 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 logger = get_logger(__name__)
 
 
+def _infer_all_linear_target_module_suffixes(
+    model: torch.nn.Module,
+) -> list[str]:
+    """Infer a PEFT `target_modules` list that approximates "all linear layers".
+
+    This is used as a fallback when PEFT does not support passing
+    `target_modules="all-linear"`.
+    """
+    suffixes: set[str] = set()
+    for name, module in model.named_modules():
+        if not isinstance(module, torch.nn.Linear):
+            continue
+        if not name:
+            continue
+        suffix = name.split(".")[-1]
+        # Filter out purely numeric suffixes from Sequential-like modules.
+        if suffix.isdigit():
+            continue
+        suffixes.add(suffix)
+    return sorted(suffixes)
+
+
+def _freeze_modules_lora_safe(
+    model: torch.nn.Module, freeze_modules: str | None
+) -> list[str]:
+    """Freeze module paths while keeping LoRA adapter params trainable.
+
+    Notes:
+        We intentionally implement this locally so we don't need to modify
+        `trainer_tools.py`. This helper is only used when `use_lora=true`.
+    """
+    if not freeze_modules or not isinstance(freeze_modules, str):
+        return []
+
+    frozen: list[str] = []
+    patterns = [p.strip() for p in freeze_modules.split(",") if p.strip()]
+    for path in patterns:
+        module = model
+        try:
+            for attr in path.split("."):
+                module = getattr(module, attr)
+        except AttributeError:
+            logger.warning(
+                f"freeze module path does not exist, cannot freeze: {path}"
+            )
+            continue
+
+        for name, param in module.named_parameters():
+            lowered = name.lower()
+            if "lora" in lowered:
+                continue
+            param.requires_grad = False
+        frozen.append(path)
+
+    return frozen
+
+
 def load_fast_tokenizer():
     """載入 fast tokenizer / processor。
 
@@ -84,7 +141,7 @@ def setup_directories(cfg) -> Path:
     cfg.output_dir = os.path.join(cfg.run_root_dir, cfg.run_id)
     output_dir = Path(cfg.output_dir)
 
-    if not dist.is_initialized() or dist.get_rank() == 0:
+    if dist.get_rank() == 0:
         os.makedirs(output_dir, exist_ok=True)
         os.makedirs(output_dir / "checkpoints", exist_ok=True)
 
@@ -127,7 +184,7 @@ def setup_optimizer_and_scheduler(
         eps=cfg.trainer.optimizer.eps,
     )
 
-    if dist.is_initialized() and dist.get_rank() == 0:
+    if dist.get_rank() == 0:
         for group in optimizer.param_groups:
             logger.info(
                 f"LR Group {group['name']}: lr={group['lr']}, num_params={len(group['params'])}"
@@ -153,6 +210,7 @@ class VLATrainer(TrainerUtils):
         optimizer,
         lr_scheduler,
         accelerator,
+        lora_freeze_modules: str | None = None,
     ):
         # 訓練主狀態: cfg/model/dataloader/optimizer/scheduler/accelerator
         self.config = cfg
@@ -162,13 +220,18 @@ class VLATrainer(TrainerUtils):
         self.lr_scheduler = lr_scheduler
         self.accelerator = accelerator
 
+        # When `use_lora=true`, we temporarily clear `cfg.trainer.freeze_modules` before
+        # building the optimizer, to prevent LoRA params from being excluded by
+        # param-group construction utilities. We keep the original freeze list here.
+        self.lora_freeze_modules = lora_freeze_modules
+
         # completed_steps: 只在 optimizer step (sync_gradients=True) 時增加
         self.completed_steps = 0
         self.total_batch_size = self._calculate_total_batch_size()
 
     def prepare_training(self):
         """訓練前準備: seed、checkpoint、freeze、distributed prepare、wandb。"""
-        rank = dist.get_rank() if dist.is_initialized() else 0
+        rank = dist.get_rank()
         seed = (
             self.config.seed + rank
             if hasattr(self.config, "seed")
@@ -182,17 +245,30 @@ class VLATrainer(TrainerUtils):
         # 2) 若 resume 且 completed_steps>0, 先把 scheduler step 到正確位置
         self._adjust_lr_scheduler_for_resume()
 
-        freeze_modules = (
-            self.config.trainer.freeze_modules
-            if (self.config and hasattr(self.config.trainer, "freeze_modules"))
-            else None
-        )
+        freeze_modules = None
+        if (
+            self.config
+            and hasattr(self.config, "trainer")
+            and hasattr(self.config.trainer, "freeze_modules")
+        ):
+            freeze_modules = self.config.trainer.freeze_modules
 
-        # 3) 冻結指定 backbone (例如 vision encoder / language model 等), 只訓練 head 或 LoRA
-        self.model = self.freeze_backbones(
-            self.model, freeze_modules=freeze_modules
-        )
-        self.print_trainable_parameters(self.model)
+        # 3) Freeze
+        # - LoRA mode: freeze base modules but keep LoRA params trainable.
+        # - Non-LoRA mode: keep original TrainerUtils behavior.
+        if self.config.get("use_lora", False):
+            frozen_paths = _freeze_modules_lora_safe(
+                self.model, self.lora_freeze_modules or freeze_modules
+            )
+            if dist.get_rank() == 0:
+                logger.info(f"🔒 Frozen modules (LoRA-safe): {frozen_paths}")
+        else:
+            self.model = self.freeze_backbones(
+                self.model, freeze_modules=freeze_modules
+            )
+
+        if dist.get_rank() == 0:
+            self.print_trainable_parameters(self.model)
 
         # 4) 交給 Accelerate 處理 DDP/DeepSpeed/mixed precision 等包裝
         self.model, self.optimizer, self.vla_train_dataloader = (
@@ -218,7 +294,7 @@ class VLATrainer(TrainerUtils):
 
     def _init_wandb(self):
         """Initialize Weights & Biases."""
-        if self.accelerator.is_main_process:
+        if dist.get_rank() == 0:
             # dir: 把 wandb 檔案寫到 run output 之下, 便於收集/同步
             wandb.init(
                 name=self.config.run_id,
@@ -239,8 +315,6 @@ class VLATrainer(TrainerUtils):
             self.config.trainer, "pretrained_checkpoint", None
         )
         is_resume = getattr(self.config.trainer, "is_resume", False)
-        self.resume_from_checkpoint = pretrained_checkpoint
-
         if is_resume:
             # 從 checkpoints/ 找最新 steps_xxx
             resume_from_checkpoint, self.completed_steps = (
@@ -304,7 +378,7 @@ class VLATrainer(TrainerUtils):
 
     def _save_checkpoint(self):
         """Save current training state."""
-        if self.accelerator.is_main_process:
+        if dist.get_rank() == 0:
             save_format = getattr(self.config.trainer, "save_format", "pt")
             checkpoint_path = os.path.join(
                 self.checkpoint_dir, f"steps_{self.completed_steps}"
@@ -452,7 +526,7 @@ class VLATrainer(TrainerUtils):
         output_dict = unwrapped_model.predict_action(
             examples=examples, use_ddim=True, num_ddim_steps=20
         )
-        if self.accelerator.is_main_process:
+        if dist.get_rank() == 0:
             normalized_actions = output_dict["normalized_actions"]
             actions = np.array(actions)
             num_pots = np.prod(actions.shape)
@@ -465,7 +539,7 @@ class VLATrainer(TrainerUtils):
 
     def _log_training_config(self):
         """Record training config."""
-        if self.accelerator.is_main_process:
+        if dist.get_rank() == 0:
             logger.info("***** Training Configuration *****")
             logger.info(
                 f"  Total optimization steps = {self.config.trainer.max_train_steps}"
@@ -508,7 +582,7 @@ class VLATrainer(TrainerUtils):
 
     def _finalize_training(self):
         """Training end processing."""
-        if self.accelerator.is_main_process:
+        if dist.get_rank() == 0:
             save_format = getattr(self.config.trainer, "save_format", "pt")
             final_checkpoint = os.path.join(
                 self.config.output_dir, "final_model"
@@ -544,7 +618,7 @@ class VLATrainer(TrainerUtils):
                 f"Training complete. Final model saved at {final_checkpoint}"
             )
 
-        if self.accelerator.is_main_process:
+        if dist.get_rank() == 0:
             wandb.finish()
 
         self.accelerator.wait_for_everyone()
@@ -562,25 +636,60 @@ def main(cfg) -> None:
     # build_framework: 建立 StarVLA 的模型框架 (含 encoder/decoder/action head 等)
     vla = build_framework(cfg)
 
+    # IMPORTANT: If we're doing LoRA, we must avoid passing `trainer.freeze_modules` into
+    # optimizer param-group building, otherwise LoRA params (which live under the frozen
+    # parent module) may be excluded. We clear it temporarily and carry the original
+    # value into the trainer to apply LoRA-safe freezing later.
+    lora_freeze_modules = None
+    if (
+        cfg.get("use_lora", False)
+        and hasattr(cfg, "trainer")
+        and hasattr(cfg.trainer, "freeze_modules")
+    ):
+        lora_freeze_modules = cfg.trainer.freeze_modules
+        cfg.trainer.freeze_modules = ""
+
     if cfg.get("use_lora", False):
         logger.info("Injecting LoRA Adapters into the model")
 
-        # LoRA 設定從 cfg.lora_config 讀取, 沒提供就用預設
-        lora_cfg = cfg.get("lora_config", {})
-        target_modules = list(
-            lora_cfg.get(
-                "target_modules", ["q_proj", "v_proj", "k_proj", "o_proj"]
-            )
-        )
+        # LoRA defaults (no config required).
+        # Default target is the whole model (all Linear layers).
+        lora_r = 16
+        lora_alpha = 32
+        lora_dropout = 0.05
+        target_modules: str | list[str] = "all-linear"
 
-        # target_modules: 一般對 attention 的投影層下手 (q/k/v/o)
-        peft_config = LoraConfig(
-            r=lora_cfg.get("r", 16),
-            lora_alpha=lora_cfg.get("lora_alpha", 32),
-            target_modules=target_modules,
-            lora_dropout=lora_cfg.get("lora_dropout", 0.05),
-            bias="none",
-        )
+        # Preferred default: apply LoRA to all linear layers.
+        # If the installed PEFT version doesn't support "all-linear", we fall back to
+        # an inferred list of Linear module name suffixes.
+        try:
+            peft_config = LoraConfig(
+                r=lora_r,
+                lora_alpha=lora_alpha,
+                target_modules=target_modules,
+                lora_dropout=lora_dropout,
+                bias="none",
+            )
+        except Exception as e:
+            if (
+                isinstance(target_modules, str)
+                and target_modules == "all-linear"
+            ):
+                inferred = _infer_all_linear_target_module_suffixes(vla)
+                if dist.get_rank() == 0:
+                    logger.warning(
+                        "PEFT does not accept target_modules='all-linear'; "
+                        f"falling back to inferred Linear suffix list (n={len(inferred)})."
+                    )
+                peft_config = LoraConfig(
+                    r=lora_r,
+                    lora_alpha=lora_alpha,
+                    target_modules=inferred,
+                    lora_dropout=lora_dropout,
+                    bias="none",
+                )
+            else:
+                raise e
 
         # if hasattr(vla, "enable_input_require_grads"):
         #    vla.enable_input_require_grads()
@@ -588,7 +697,7 @@ def main(cfg) -> None:
         # get_peft_model: 以 PEFT 的方式把 LoRA modules 注入到 model
         vla = get_peft_model(vla, peft_config)
 
-        if not dist.is_initialized() or dist.get_rank() == 0:
+        if dist.get_rank() == 0:
             # 只在 rank0 打印可訓練參數量, 避免輸出爆炸
             vla.print_trainable_parameters()
 
@@ -604,6 +713,7 @@ def main(cfg) -> None:
         optimizer=optimizer,
         lr_scheduler=lr_scheduler,
         accelerator=accelerator,
+        lora_freeze_modules=lora_freeze_modules,
     )
 
     trainer.prepare_training()
@@ -632,7 +742,7 @@ if __name__ == "__main__":
     cli_cfg = OmegaConf.from_dotlist(dotlist)
     cfg = OmegaConf.merge(cfg, cli_cfg)
 
-    if cfg.is_debug and dist.is_initialized() and dist.get_rank() == 0:
+    if cfg.is_debug and dist.get_rank() == 0:
         import debugpy
 
         debugpy.listen(("0.0.0.0", 10092))
