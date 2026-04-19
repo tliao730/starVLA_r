@@ -390,9 +390,39 @@ class VLATrainer(TrainerUtils):
             if self.config.get("use_lora", False):
                 # LoRA 模式下只保存 adapter 權重 (更小, 更易於合併/部署)
                 unwrapped_model = self.accelerator.unwrap_model(self.model)
-                state_dict = get_peft_model_state_dict(
-                    unwrapped_model, state_dict=state_dict
-                )
+                # Some framework wrappers (e.g. Qwenvl_Fast) do not implement
+                # `get_input_embeddings()` / `get_output_embeddings()`. PEFT may
+                # try to access them when `save_embedding_layers=True`.
+                #
+                # For this project, we prefer saving LoRA adapter weights only;
+                # avoid the embedding save path and fall back to filtering LoRA
+                # keys if PEFT extraction still fails.
+                try:
+                    state_dict = get_peft_model_state_dict(
+                        unwrapped_model,
+                        state_dict=state_dict,
+                        save_embedding_layers=False,
+                    )
+                except NotImplementedError as e:
+                    logger.warning(
+                        "PEFT adapter state extraction hit NotImplementedError "
+                        f"({e}); falling back to saving only LoRA keys from state_dict."
+                    )
+                    state_dict = {
+                        k: v
+                        for k, v in state_dict.items()
+                        if "lora" in k.lower()
+                    }
+                except Exception as e:
+                    logger.warning(
+                        "PEFT adapter state extraction failed; falling back to saving only LoRA keys from state_dict. "
+                        f"Error: {e}"
+                    )
+                    state_dict = {
+                        k: v
+                        for k, v in state_dict.items()
+                        if "lora" in k.lower()
+                    }
 
             if save_format == "safetensors":
                 from safetensors.torch import save_file
