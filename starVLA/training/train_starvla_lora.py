@@ -624,9 +624,32 @@ class VLATrainer(TrainerUtils):
 
             if self.config.get("use_lora", False):
                 unwrapped_model = self.accelerator.unwrap_model(self.model)
-                state_dict = get_peft_model_state_dict(
-                    unwrapped_model, state_dict=state_dict
-                )
+                try:
+                    state_dict = get_peft_model_state_dict(
+                        unwrapped_model,
+                        state_dict=state_dict,
+                        save_embedding_layers=False,
+                    )
+                except NotImplementedError as e:
+                    logger.warning(
+                        "PEFT final adapter state extraction hit NotImplementedError "
+                        f"({e}); falling back to saving only LoRA keys from state_dict."
+                    )
+                    state_dict = {
+                        k: v
+                        for k, v in state_dict.items()
+                        if "lora" in k.lower()
+                    }
+                except Exception as e:
+                    logger.warning(
+                        "PEFT final adapter state extraction failed; falling back to saving only LoRA keys from state_dict. "
+                        f"Error: {e}"
+                    )
+                    state_dict = {
+                        k: v
+                        for k, v in state_dict.items()
+                        if "lora" in k.lower()
+                    }
 
             if save_format == "safetensors":
                 from safetensors.torch import save_file
