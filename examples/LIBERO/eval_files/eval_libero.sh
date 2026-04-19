@@ -18,7 +18,7 @@ unnorm_key="franka"
 
 ############ CHECKPOINT PATH ############
 # your_ckpt=results/Checkpoints/Qwen2.5-VL-FAST-LIBERO-4in1/checkpoints/steps_30000_pytorch_model.pt
-your_ckpt=results/checkpoints/finetune_task48_2000step/final_model/pytorch_model.pt
+your_ckpt=results/checkpoints/finetune_task33_2000step/full_model_from_lora/pytorch_model.pt
 # export DEBUG=true
 
 folder_name=$(echo "$your_ckpt" | awk -F'/' '{print $(NF-2)"_"$(NF-1)"_"$NF}')
