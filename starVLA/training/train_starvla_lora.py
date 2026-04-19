@@ -3,18 +3,27 @@
 # Implemented by [Jinhui YE / HKUST University] in [2025].
 
 """
-StarVLA’s trainer is built directly on native PyTorch + Accelerate + DeepSpeed, keeping the loop explicit and easy to hack.
+StarVLA's trainer is built directly on native PyTorch + Accelerate + DeepSpeed,
+keeping the loop explicit and easy to hack.
 Conventions:
 1. Store runtime state in dicts where possible (simplifies data info, procesing info, config, etc).
 2. Use multiple dataloaders to adapt heterogeneous data types / task mixtures.
-3. Put each training strategy in its own `trainer_*.py` file (avoid large if‑else chains).
+3. Put each training strategy in its own `trainer_*.py` file (avoid large if-else chains).
+
+這支檔案是「StarVLA + LoRA」版本的訓練入口:
+- 使用 Accelerate 封裝分散式/混合精度/DeepSpeed。
+- 依照 YAML + CLI dotlist 組合出 cfg。
+- 依 cfg 建立 framework(model) 與 dataloader。
+- (可選) 將 LoRA adapters 注入到指定 target_modules。
+- 建立 optimizer / scheduler。
+- 進入顯式的 train loop, 週期性 eval / log / save。
+
 """
 
 # Standard Library
 import argparse
 import json
 import os
-import re
 import time
 from pathlib import Path
 from typing import Tuple
@@ -28,16 +37,23 @@ from accelerate import Accelerator, DeepSpeedPlugin
 from accelerate.logging import get_logger
 from accelerate.utils import set_seed
 from omegaconf import OmegaConf
+from peft import LoraConfig, get_peft_model, get_peft_model_state_dict
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers import AutoProcessor, get_scheduler
-from peft import LoraConfig, get_peft_model, get_peft_model_state_dict
 
 # Local Modules
 from starVLA.dataloader import build_dataloader
 from starVLA.model.framework import build_framework
-from starVLA.training.trainer_utils.config_tracker import AccessTrackedConfig, wrap_config
-from starVLA.training.trainer_utils.trainer_tools import TrainerUtils, build_param_lr_groups, normalize_dotlist_args
+from starVLA.training.trainer_utils.config_tracker import (
+    AccessTrackedConfig,
+    wrap_config,
+)
+from starVLA.training.trainer_utils.trainer_tools import (
+    TrainerUtils,
+    build_param_lr_groups,
+    normalize_dotlist_args,
+)
 
 deepspeed_plugin = DeepSpeedPlugin()
 accelerator = Accelerator(deepspeed_plugin=deepspeed_plugin)
@@ -51,11 +67,20 @@ logger = get_logger(__name__)
 
 
 def load_fast_tokenizer():
-    return AutoProcessor.from_pretrained("physical-intelligence/fast", trust_remote_code=True)
+    """載入 fast tokenizer / processor。
+
+    注意: 此檔案目前未直接使用 tokenizer, 但保留接口便於未來擴充。
+    """
+    return AutoProcessor.from_pretrained(
+        "physical-intelligence/fast", trust_remote_code=True
+    )
 
 
 def setup_directories(cfg) -> Path:
-    """Create output directory and checkpoint directory."""
+    """建立輸出資料夾與 checkpoint 資料夾。
+
+    分散式訓練時只讓 rank0 建立資料夾, 避免競態。
+    """
     cfg.output_dir = os.path.join(cfg.run_root_dir, cfg.run_id)
     output_dir = Path(cfg.output_dir)
 
@@ -67,17 +92,32 @@ def setup_directories(cfg) -> Path:
 
 
 def prepare_data(cfg, accelerator, output_dir) -> DataLoader:
-    """Prepare VLA training data."""
-    logger.info(f"Creating VLA Dataset with Mixture `{cfg.datasets.vla_data.data_mix}`")
-    vla_train_dataloader = build_dataloader(cfg=cfg, dataset_py=cfg.datasets.vla_data.dataset_py)
+    """建立 VLA 訓練 dataloader。
+
+    - `build_dataloader` 會依 cfg.datasets.vla_data.* 產生對應資料混合與 sampling。
+    - Accelerate 的 `dispatch_batches=False` 通常用於「每個 process 自己拿 batch」而非由主進程分發。
+
+    注意: 此函式呼叫了 `dist.barrier()`, 代表呼叫前需要已 init_process_group。
+    """
+    logger.info(
+        f"Creating VLA Dataset with Mixture `{cfg.datasets.vla_data.data_mix}`"
+    )
+    vla_train_dataloader = build_dataloader(
+        cfg=cfg, dataset_py=cfg.datasets.vla_data.dataset_py
+    )
 
     accelerator.dataloader_config.dispatch_batches = False
     dist.barrier()
     return vla_train_dataloader
 
 
-def setup_optimizer_and_scheduler(model, cfg) -> Tuple[torch.optim.Optimizer, torch.optim.lr_scheduler._LRScheduler]:
-    """Set optimizer and scheduler."""
+def setup_optimizer_and_scheduler(
+    model, cfg
+) -> Tuple[torch.optim.Optimizer, torch.optim.lr_scheduler._LRScheduler]:
+    """建立 optimizer 與 learning-rate scheduler。
+
+    這裡透過 `build_param_lr_groups` 將不同 module 分成不同 lr group (例如 backbone vs head)。
+    """
     param_groups = build_param_lr_groups(model=model, cfg=cfg)
     optimizer = torch.optim.AdamW(
         param_groups,
@@ -89,7 +129,9 @@ def setup_optimizer_and_scheduler(model, cfg) -> Tuple[torch.optim.Optimizer, to
 
     if dist.is_initialized() and dist.get_rank() == 0:
         for group in optimizer.param_groups:
-            logger.info(f"LR Group {group['name']}: lr={group['lr']}, num_params={len(group['params'])}")
+            logger.info(
+                f"LR Group {group['name']}: lr={group['lr']}, num_params={len(group['params'])}"
+            )
 
     lr_scheduler = get_scheduler(
         name=cfg.trainer.lr_scheduler_type,
@@ -103,7 +145,16 @@ def setup_optimizer_and_scheduler(model, cfg) -> Tuple[torch.optim.Optimizer, to
 
 
 class VLATrainer(TrainerUtils):
-    def __init__(self, cfg, model, vla_train_dataloader, optimizer, lr_scheduler, accelerator):
+    def __init__(
+        self,
+        cfg,
+        model,
+        vla_train_dataloader,
+        optimizer,
+        lr_scheduler,
+        accelerator,
+    ):
+        # 訓練主狀態: cfg/model/dataloader/optimizer/scheduler/accelerator
         self.config = cfg
         self.model = model
         self.vla_train_dataloader = vla_train_dataloader
@@ -111,15 +162,24 @@ class VLATrainer(TrainerUtils):
         self.lr_scheduler = lr_scheduler
         self.accelerator = accelerator
 
+        # completed_steps: 只在 optimizer step (sync_gradients=True) 時增加
         self.completed_steps = 0
         self.total_batch_size = self._calculate_total_batch_size()
 
     def prepare_training(self):
+        """訓練前準備: seed、checkpoint、freeze、distributed prepare、wandb。"""
         rank = dist.get_rank() if dist.is_initialized() else 0
-        seed = self.config.seed + rank if hasattr(self.config, "seed") else rank + 3047
+        seed = (
+            self.config.seed + rank
+            if hasattr(self.config, "seed")
+            else rank + 3047
+        )
         set_seed(seed)
 
+        # 1) 決定是否 resume / load pretrained
         self._init_checkpointing()
+
+        # 2) 若 resume 且 completed_steps>0, 先把 scheduler step 到正確位置
         self._adjust_lr_scheduler_for_resume()
 
         freeze_modules = (
@@ -127,20 +187,29 @@ class VLATrainer(TrainerUtils):
             if (self.config and hasattr(self.config.trainer, "freeze_modules"))
             else None
         )
-        self.model = self.freeze_backbones(self.model, freeze_modules=freeze_modules)
+
+        # 3) 冻結指定 backbone (例如 vision encoder / language model 等), 只訓練 head 或 LoRA
+        self.model = self.freeze_backbones(
+            self.model, freeze_modules=freeze_modules
+        )
         self.print_trainable_parameters(self.model)
 
-        self.model, self.optimizer, self.vla_train_dataloader = self.setup_distributed_training(
-            self.accelerator,
-            self.model,
-            self.optimizer,
-            self.vla_train_dataloader,
+        # 4) 交給 Accelerate 處理 DDP/DeepSpeed/mixed precision 等包裝
+        self.model, self.optimizer, self.vla_train_dataloader = (
+            self.setup_distributed_training(
+                self.accelerator,
+                self.model,
+                self.optimizer,
+                self.vla_train_dataloader,
+            )
         )
 
+        # 5) 只在 main process 初始化 wandb (避免重複創建 run)
         self._init_wandb()
 
     def _calculate_total_batch_size(self):
         """Calculate global batch size."""
+        # Global batch size = per_device_batch_size * num_processes * grad_accum
         return (
             self.config.datasets.vla_data.per_device_batch_size
             * self.accelerator.num_processes
@@ -150,6 +219,7 @@ class VLATrainer(TrainerUtils):
     def _init_wandb(self):
         """Initialize Weights & Biases."""
         if self.accelerator.is_main_process:
+            # dir: 把 wandb 檔案寫到 run output 之下, 便於收集/同步
             wandb.init(
                 name=self.config.run_id,
                 dir=os.path.join(self.config.output_dir, "wandb"),
@@ -160,40 +230,66 @@ class VLATrainer(TrainerUtils):
 
     def _init_checkpointing(self):
         """Initialize checkpoint directory and handle checkpoint loading."""
-        self.checkpoint_dir = os.path.join(self.config.output_dir, "checkpoints")
+        self.checkpoint_dir = os.path.join(
+            self.config.output_dir, "checkpoints"
+        )
         os.makedirs(self.checkpoint_dir, exist_ok=True)
 
-        pretrained_checkpoint = getattr(self.config.trainer, "pretrained_checkpoint", None)
+        pretrained_checkpoint = getattr(
+            self.config.trainer, "pretrained_checkpoint", None
+        )
         is_resume = getattr(self.config.trainer, "is_resume", False)
         self.resume_from_checkpoint = pretrained_checkpoint
 
         if is_resume:
-            resume_from_checkpoint, self.completed_steps = self._get_latest_checkpoint(self.checkpoint_dir)
+            # 從 checkpoints/ 找最新 steps_xxx
+            resume_from_checkpoint, self.completed_steps = (
+                self._get_latest_checkpoint(self.checkpoint_dir)
+            )
             if resume_from_checkpoint:
                 self.resume_from_checkpoint = resume_from_checkpoint
-                self.model = self.load_pretrained_backbones(self.model, self.resume_from_checkpoint, reload_modules=None)
+
+                # 這裡是「只載入 backbones」的邏輯 (由 TrainerUtils 實作), 通常用於避免重載 optimizer 狀態
+                self.model = self.load_pretrained_backbones(
+                    self.model, self.resume_from_checkpoint, reload_modules=None
+                )
                 logger.info(
                     f"Resuming training from checkpoint: {self.resume_from_checkpoint}, steps: {self.completed_steps}"
                 )
                 return
 
-            logger.warning(f"No valid checkpoint found in {self.checkpoint_dir}. Starting training from scratch.")
+            logger.warning(
+                f"No valid checkpoint found in {self.checkpoint_dir}. Starting training from scratch."
+            )
             self.completed_steps = 0
 
         if pretrained_checkpoint:
-            reload_modules = getattr(self.config.trainer, "reload_modules", None)
-            self.model = self.load_pretrained_backbones(self.model, pretrained_checkpoint, reload_modules=reload_modules)
+            reload_modules = getattr(
+                self.config.trainer, "reload_modules", None
+            )
+
+            # 從指定 checkpoint 載入權重 (可指定只載入部分模組)
+            self.model = self.load_pretrained_backbones(
+                self.model, pretrained_checkpoint, reload_modules=reload_modules
+            )
             self.completed_steps = 0
             self.resume_from_checkpoint = pretrained_checkpoint
-            logger.info(f"Loaded pretrained checkpoint: {pretrained_checkpoint}, steps: {self.completed_steps}")
+            logger.info(
+                f"Loaded pretrained checkpoint: {pretrained_checkpoint}, steps: {self.completed_steps}"
+            )
         else:
-            logger.info("No pretrained checkpoint provided. Starting training from scratch.")
+            logger.info(
+                "No pretrained checkpoint provided. Starting training from scratch."
+            )
             self.completed_steps = 0
 
     def _adjust_lr_scheduler_for_resume(self):
         """Adjust LR scheduler state after resuming from non-zero steps."""
         if self.completed_steps > 0:
-            logger.info(f"Adjusting LR scheduler for resume from step {self.completed_steps}")
+            logger.info(
+                f"Adjusting LR scheduler for resume from step {self.completed_steps}"
+            )
+            # 很多 scheduler (例如 linear/cosine) 依 step 更新; resume 後需要對齊
             for _ in range(self.completed_steps):
                 self.lr_scheduler.step()
             logger.info(
@@ -202,6 +298,7 @@ class VLATrainer(TrainerUtils):
 
     def _load_checkpoint(self, checkpoint_path):
         """Load checkpoint."""
+        # 若你有用 accelerate.save_state / load_state, 這裡會恢復 optimizer/scheduler 等狀態
         self.accelerator.load_state(checkpoint_path)
         self.accelerator.print(f"Resumed from checkpoint: {checkpoint_path}")
 
@@ -209,14 +306,20 @@ class VLATrainer(TrainerUtils):
         """Save current training state."""
         if self.accelerator.is_main_process:
             save_format = getattr(self.config.trainer, "save_format", "pt")
-            checkpoint_path = os.path.join(self.checkpoint_dir, f"steps_{self.completed_steps}")
+            checkpoint_path = os.path.join(
+                self.checkpoint_dir, f"steps_{self.completed_steps}"
+            )
 
+            # Accelerator 統一處理各種 wrapper 下正確的 state_dict
             state_dict = self.accelerator.get_state_dict(self.model)
-          
+
             if self.config.get("use_lora", False):
+                # LoRA 模式下只保存 adapter 權重 (更小, 更易於合併/部署)
                 unwrapped_model = self.accelerator.unwrap_model(self.model)
-                state_dict = get_peft_model_state_dict(unwrapped_model, state_dict=state_dict)
-              
+                state_dict = get_peft_model_state_dict(
+                    unwrapped_model, state_dict=state_dict
+                )
+
             if save_format == "safetensors":
                 from safetensors.torch import save_file
 
@@ -224,31 +327,45 @@ class VLATrainer(TrainerUtils):
             elif save_format == "pt":
                 torch.save(state_dict, checkpoint_path + "_pytorch_model.pt")
             else:
-                raise ValueError(f"Unsupported save_format `{save_format}`. Expected `pt` or `safetensors`.")
+                raise ValueError(
+                    f"Unsupported save_format `{save_format}`. Expected `pt` or `safetensors`."
+                )
 
             summary_data = {"steps": self.completed_steps}
-            with open(os.path.join(self.config.output_dir, "summary.jsonl"), "a") as f:
+            with open(
+                os.path.join(self.config.output_dir, "summary.jsonl"), "a"
+            ) as f:
                 f.write(json.dumps(summary_data) + "\n")
             self.accelerator.print(f"✅ Checkpoint saved at {checkpoint_path}")
 
             if isinstance(self.config, AccessTrackedConfig):
+                # AccessTrackedConfig 會記錄「訓練過程中實際被讀取過的 cfg key」
                 logger.info("📊 Saving accessed configuration...")
                 output_dir = Path(self.config.output_dir)
-                self.config.save_accessed_config(output_dir / "config.yaml", use_original_values=False)
+                self.config.save_accessed_config(
+                    output_dir / "config.yaml", use_original_values=False
+                )
                 logger.info("✅ Configuration files saved")
 
         self.accelerator.wait_for_everyone()
 
     def _log_metrics(self, metrics):
         """Record training metrics."""
-        if self.completed_steps % self.config.trainer.logging_frequency == 0 and dist.get_rank() == 0:
+        if (
+            self.completed_steps % self.config.trainer.logging_frequency == 0
+            and dist.get_rank() == 0
+        ):
+            # learning_rate: 取第一組 lr (若有多 group, 可在這裡擴展記錄)
             metrics["learning_rate"] = self.lr_scheduler.get_last_lr()[0]
-            metrics["epoch"] = round(self.completed_steps / len(self.vla_train_dataloader), 2)
+            metrics["epoch"] = round(
+                self.completed_steps / len(self.vla_train_dataloader), 2
+            )
             wandb.log(metrics, step=self.completed_steps)
             logger.info(f"Step {self.completed_steps}, Loss: {metrics})")
 
     def _create_data_iterators(self):
         """Create data iterators."""
+        # 用 iterator 的好處: 可以自訂 StopIteration 後的 epoch 重置行為
         self.vla_iter = iter(self.vla_train_dataloader)
 
     def _get_next_batch(self):
@@ -256,10 +373,13 @@ class VLATrainer(TrainerUtils):
         try:
             batch_vla = next(self.vla_iter)
         except StopIteration:
+            # 一個 epoch 跑完: 重置 dataloader 並增加 epoch 計數
             if not hasattr(self, "vla_epoch_count"):
                 self.vla_epoch_count = 0
-            self.vla_iter, self.vla_epoch_count = TrainerUtils._reset_dataloader(
-                self.vla_train_dataloader, self.vla_epoch_count
+            self.vla_iter, self.vla_epoch_count = (
+                TrainerUtils._reset_dataloader(
+                    self.vla_train_dataloader, self.vla_epoch_count
+                )
             )
             batch_vla = next(self.vla_iter)
 
@@ -269,8 +389,11 @@ class VLATrainer(TrainerUtils):
         """Execute training loop."""
         self._log_training_config()
         self._create_data_iterators()
+
+        # tqdm 只在 local main process 顯示, 避免多進程輸出互相干擾
         progress_bar = tqdm(
-            range(self.config.trainer.max_train_steps), disable=not self.accelerator.is_local_main_process
+            range(self.config.trainer.max_train_steps),
+            disable=not self.accelerator.is_local_main_process,
         )
 
         while self.completed_steps < self.config.trainer.max_train_steps:
@@ -283,6 +406,7 @@ class VLATrainer(TrainerUtils):
             t_end_model = time.perf_counter()
 
             if self.accelerator.sync_gradients:
+                # 只有在 sync_gradients=True (累積步數到達) 時才算完成一個 optimization step
                 progress_bar.update(1)
                 self.completed_steps += 1
 
@@ -295,13 +419,18 @@ class VLATrainer(TrainerUtils):
                 )
 
             if self.completed_steps % self.config.trainer.eval_interval == 0:
+                # 週期性做一個簡單 action-eval (當前 batch 上的 MSE)
                 step_metrics = self.eval_action_model(step_metrics)
 
             step_metrics["data_time"] = t_end_data - t_start_data
             step_metrics["model_time"] = t_end_model - t_start_model
             self._log_metrics(step_metrics)
 
-            if self.completed_steps % self.config.trainer.save_interval == 0 and self.completed_steps > 0:
+            if (
+                self.completed_steps % self.config.trainer.save_interval == 0
+                and self.completed_steps > 0
+            ):
+                # 週期性保存 checkpoint (可選 pt/safetensors; LoRA 只存 adapters)
                 self._save_checkpoint()
 
             if self.completed_steps >= self.config.trainer.max_train_steps:
@@ -309,13 +438,20 @@ class VLATrainer(TrainerUtils):
 
         self._finalize_training()
 
-    def eval_action_model(self, step_metrics: dict = None) -> float:
+    def eval_action_model(
+        self, step_metrics: dict | None = None
+    ) -> dict | None:
         """Run simple action-eval on current batch and attach score to metrics."""
+        # 這裡用下一個 batch 做快速 sanity-check: 預測 action 與 GT action 的距離
         examples = self._get_next_batch()
         actions = [example["action"] for example in examples]
-        #output_dict = self.model.predict_action(examples=examples, use_ddim=True, num_ddim_steps=20)
+        # output_dict = self.model.predict_action(examples=examples, use_ddim=True, num_ddim_steps=20)
+
+        # 若 model 被 accelerate/deepspeed 包裝, 做推理/呼叫自訂方法時常需要 unwrap
         unwrapped_model = self.accelerator.unwrap_model(self.model)
-        output_dict = unwrapped_model.predict_action(examples=examples, use_ddim=True, num_ddim_steps=20)
+        output_dict = unwrapped_model.predict_action(
+            examples=examples, use_ddim=True, num_ddim_steps=20
+        )
         if self.accelerator.is_main_process:
             normalized_actions = output_dict["normalized_actions"]
             actions = np.array(actions)
@@ -331,16 +467,24 @@ class VLATrainer(TrainerUtils):
         """Record training config."""
         if self.accelerator.is_main_process:
             logger.info("***** Training Configuration *****")
-            logger.info(f"  Total optimization steps = {self.config.trainer.max_train_steps}")
-            logger.info(f"  Per device batch size = {self.config.datasets.vla_data.per_device_batch_size}")
-            logger.info(f"  Gradient accumulation steps = {self.config.trainer.gradient_accumulation_steps}")
+            logger.info(
+                f"  Total optimization steps = {self.config.trainer.max_train_steps}"
+            )
+            logger.info(
+                f"  Per device batch size = {self.config.datasets.vla_data.per_device_batch_size}"
+            )
+            logger.info(
+                f"  Gradient accumulation steps = {self.config.trainer.gradient_accumulation_steps}"
+            )
             logger.info(f"  Total batch size = {self.total_batch_size}")
 
     def _train_step(self, batch_vla, batch_vlm=None):
         """Execute single training step."""
         with self.accelerator.accumulate(self.model):
+            # accumulate 會在 gradient_accumulation_steps 之間自動處理 sync/no_sync
             self.optimizer.zero_grad()
 
+            # bfloat16 autocast: 通常在 A100/H100 等上更穩定也更快
             with torch.autocast("cuda", dtype=torch.bfloat16):
                 output_dict = self.model.forward(batch_vla)
                 action_loss = output_dict["action_loss"]
@@ -349,7 +493,11 @@ class VLATrainer(TrainerUtils):
             self.accelerator.backward(total_loss)
 
             if self.config.trainer.gradient_clipping is not None:
-                self.accelerator.clip_grad_norm_(self.model.parameters(), self.config.trainer.gradient_clipping)
+                # clipping 透過 accelerator API, 能兼容各種 wrapper
+                self.accelerator.clip_grad_norm_(
+                    self.model.parameters(),
+                    self.config.trainer.gradient_clipping,
+                )
 
             self.optimizer.step()
             self.lr_scheduler.step()
@@ -362,23 +510,39 @@ class VLATrainer(TrainerUtils):
         """Training end processing."""
         if self.accelerator.is_main_process:
             save_format = getattr(self.config.trainer, "save_format", "pt")
-            final_checkpoint = os.path.join(self.config.output_dir, "final_model")
+            final_checkpoint = os.path.join(
+                self.config.output_dir, "final_model"
+            )
             os.makedirs(final_checkpoint, exist_ok=True)
+
+            # 最終導出: 同樣遵循 LoRA only / full model 的保存策略
             state_dict = self.accelerator.get_state_dict(self.model)
 
             if self.config.get("use_lora", False):
                 unwrapped_model = self.accelerator.unwrap_model(self.model)
-                state_dict = get_peft_model_state_dict(unwrapped_model, state_dict=state_dict)
-            
+                state_dict = get_peft_model_state_dict(
+                    unwrapped_model, state_dict=state_dict
+                )
+
             if save_format == "safetensors":
                 from safetensors.torch import save_file
 
-                save_file(state_dict, os.path.join(final_checkpoint, "model.safetensors"))
+                save_file(
+                    state_dict,
+                    os.path.join(final_checkpoint, "model.safetensors"),
+                )
             elif save_format == "pt":
-                torch.save(state_dict, os.path.join(final_checkpoint, "pytorch_model.pt"))
+                torch.save(
+                    state_dict,
+                    os.path.join(final_checkpoint, "pytorch_model.pt"),
+                )
             else:
-                raise ValueError(f"Unsupported save_format `{save_format}`. Expected `pt` or `safetensors`.")
-            logger.info(f"Training complete. Final model saved at {final_checkpoint}")
+                raise ValueError(
+                    f"Unsupported save_format `{save_format}`. Expected `pt` or `safetensors`."
+                )
+            logger.info(
+                f"Training complete. Final model saved at {final_checkpoint}"
+            )
 
         if self.accelerator.is_main_process:
             wandb.finish()
@@ -389,35 +553,48 @@ class VLATrainer(TrainerUtils):
 def main(cfg) -> None:
     logger.info("VLA Training :: Warming Up")
 
+    # wrap_config: 讓 cfg 變成可追蹤 access 的 wrapper (用於導出最小必要 config)
     cfg = wrap_config(cfg)
     logger.info("✅ Configuration wrapped for access tracking")
 
     output_dir = setup_directories(cfg=cfg)
+
+    # build_framework: 建立 StarVLA 的模型框架 (含 encoder/decoder/action head 等)
     vla = build_framework(cfg)
 
     if cfg.get("use_lora", False):
         logger.info("Injecting LoRA Adapters into the model")
-        
+
+        # LoRA 設定從 cfg.lora_config 讀取, 沒提供就用預設
         lora_cfg = cfg.get("lora_config", {})
-        target_modules = list(lora_cfg.get("target_modules", ["q_proj", "v_proj", "k_proj", "o_proj"]))
-        
+        target_modules = list(
+            lora_cfg.get(
+                "target_modules", ["q_proj", "v_proj", "k_proj", "o_proj"]
+            )
+        )
+
+        # target_modules: 一般對 attention 的投影層下手 (q/k/v/o)
         peft_config = LoraConfig(
             r=lora_cfg.get("r", 16),
             lora_alpha=lora_cfg.get("lora_alpha", 32),
             target_modules=target_modules,
             lora_dropout=lora_cfg.get("lora_dropout", 0.05),
-            bias="none"
+            bias="none",
         )
-        
-        #if hasattr(vla, "enable_input_require_grads"):
+
+        # if hasattr(vla, "enable_input_require_grads"):
         #    vla.enable_input_require_grads()
-            
+
+        # get_peft_model: 以 PEFT 的方式把 LoRA modules 注入到 model
         vla = get_peft_model(vla, peft_config)
-        
+
         if not dist.is_initialized() or dist.get_rank() == 0:
+            # 只在 rank0 打印可訓練參數量, 避免輸出爆炸
             vla.print_trainable_parameters()
-     
-    vla_train_dataloader = prepare_data(cfg=cfg, accelerator=accelerator, output_dir=output_dir)
+
+    vla_train_dataloader = prepare_data(
+        cfg=cfg, accelerator=accelerator, output_dir=output_dir
+    )
     optimizer, lr_scheduler = setup_optimizer_and_scheduler(model=vla, cfg=cfg)
 
     trainer = VLATrainer(
@@ -447,7 +624,10 @@ if __name__ == "__main__":
     )
     args, clipargs = parser.parse_known_args()
 
+    # 1) 先載入 YAML
     cfg = OmegaConf.load(args.config_yaml)
+
+    # 2) 再把 CLI 以 dotlist 的方式覆蓋 (例如 trainer.max_train_steps=1000)
     dotlist = normalize_dotlist_args(clipargs)
     cli_cfg = OmegaConf.from_dotlist(dotlist)
     cfg = OmegaConf.merge(cfg, cli_cfg)
