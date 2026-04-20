@@ -4,7 +4,7 @@ export star_vla_python=/usr/local/envs/starvla/bin/python
 # your_ckpt=results/Checkpoints/Qwen2.5-VL-FAST-LIBERO-4in1/checkpoints/steps_30000_pytorch_model.pt
 
 ############ CHECKPOINT PATH ############
-your_ckpt=results/checkpoints/finetune_task33_2000step/full_model_from_lora/pytorch_model.pt
+your_ckpt=results/checkpoints/task33-merging/models/merged_task33_lora.pt
 
 gpu_id=0
 port=5694
