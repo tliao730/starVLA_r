@@ -707,8 +707,8 @@ def main(cfg) -> None:
 
         # LoRA defaults (no config required).
         # Default target is the whole model (all Linear layers).
-        lora_r = 16
-        lora_alpha = 32
+        lora_r = 32
+        lora_alpha = 64
         lora_dropout = 0.05
         target_modules: str | list[str] = "all-linear"
 
